@@ -50,6 +50,8 @@ let isInitialized = false;
 
 // Initialize application
 async function initialize() {
+  if (isInitialized) return;  // Skip initialization if it's already done
+
   try {
     // Create required directories
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
@@ -57,7 +59,7 @@ async function initialize() {
 
     // Load models
     await loadModels();
-    isInitialized = true;
+    isInitialized = true;  // Set initialization flag to true
     console.log('✅ Application initialized');
   } catch (err) {
     console.error('❌ Initialization failed:', err);
@@ -67,8 +69,13 @@ async function initialize() {
 
 // Load all ONNX models
 async function loadModels() {
-  console.log(`🔍 Loading models from: ${MODEL_DIR}`);
+  // Check if models are already loaded
+  if (models.size > 0) {
+    console.log('⚠️ Models already loaded, skipping...');
+    return;
+  }
 
+  console.log(`🔍 Loading models from: ${MODEL_DIR}`);
   try {
     await fs.access(MODEL_DIR);
   } catch {
