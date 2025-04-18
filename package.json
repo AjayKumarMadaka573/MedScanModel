@@ -1,0 +1,23 @@
+{
+  "name": "music",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^1.4.5-lts.2",
+    "node-addon-api": "^8.3.1",
+    "numpy-parser": "^1.2.3",
+    "onnxruntime-node": "^1.21.0",
+    "pythonia": "^1.2.2",
+    "sharp": "^0.34.1"
+  }
+}

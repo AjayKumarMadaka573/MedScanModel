@@ -1,0 +1,21 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.pnpm-debug.log
+
+# Build directories
+dist/
+build/
+out/
+.coverage/
+
+# Runtime data
+uploads/*        # Ignore uploaded files (keep the directory)
+!uploads/.gitkeep # Optional: keep empty directory
+
+# Model files (large binaries - don't commit)
+model_checkpoints/
+models/
+
+
