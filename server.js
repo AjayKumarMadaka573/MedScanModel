@@ -71,7 +71,7 @@ async function cleanupUploads() {
       const toDelete = sortedFiles.slice(0, files.length - MAX_FILES);
       await Promise.all(toDelete.map(file => 
         fs.unlink(path.join(UPLOAD_DIR, file.name)).catch(console.error)
-      );
+      ));
     }
   } catch (err) {
     console.error('Cleanup error:', err);
