@@ -53,16 +53,16 @@ let modelsLoaded = false;
 
 // Initialize application
 async function initialize() {
-  if (isInitialized) return;  // Skip initialization if it's already done
+  if (isInitialized) return;
 
   try {
-    // Create required directories
     await fs.mkdir(UPLOAD_DIR, { recursive: true });
     await fs.mkdir(MODEL_DIR, { recursive: true });
 
-    // Load models
-    await loadModels();
-    isInitialized = true;  // Set initialization flag to true
+    // Only one initialization attempt
+    await loadModels(); 
+
+    isInitialized = true;
     console.log('✅ Application initialized');
   } catch (err) {
     console.error('❌ Initialization failed:', err);
@@ -70,30 +70,15 @@ async function initialize() {
   }
 }
 
-// Load all ONNX models
 async function loadModels() {
-  // Check if models are already loaded or currently loading
-  if (modelsLoaded) {
-    console.log('ℹ️ Models already loaded');
-    return;
-  }
-  if (modelsLoading) {
-    console.log('⏳ Models are currently being loaded');
-    return;
-  }
+  if (modelsLoaded || modelsLoading) return;
 
   modelsLoading = true;
   console.log(`🔍 Loading models from: ${MODEL_DIR}`);
 
   try {
-    // Verify model directory exists
-    try {
-      await fs.access(MODEL_DIR);
-    } catch {
-      throw new Error(`Model directory not found: ${MODEL_DIR}`);
-    }
+    await fs.access(MODEL_DIR);
 
-    // Get list of available models
     const modelFiles = await fs.readdir(MODEL_DIR);
     const onnxModels = modelFiles.filter(file => file.endsWith('.onnx'));
 
@@ -101,7 +86,6 @@ async function loadModels() {
       throw new Error(`No ONNX models found in ${MODEL_DIR}`);
     }
 
-    // Load models with progress tracking
     const loadingResults = await Promise.allSettled(
       onnxModels.map(async (modelFile) => {
         const task = modelFile.replace('.onnx', '');
@@ -124,13 +108,8 @@ async function loadModels() {
       })
     );
 
-    // Analyze loading results
-    const loadedCount = loadingResults.filter(
-      r => r.value?.status === 'loaded'
-    ).length;
-    const failedCount = loadingResults.filter(
-      r => r.value?.status === 'failed'
-    ).length;
+    const loadedCount = loadingResults.filter(r => r.value?.status === 'loaded').length;
+    const failedCount = loadingResults.filter(r => r.value?.status === 'failed').length;
 
     if (loadedCount === 0) {
       throw new Error('No models could be loaded');
@@ -142,11 +121,6 @@ async function loadModels() {
     console.log(`   ➔ Skipped: ${loadingResults.length - loadedCount - failedCount}\n`);
 
     modelsLoaded = true;
-    return {
-      total: onnxModels.length,
-      loaded: loadedCount,
-      failed: failedCount
-    };
   } catch (err) {
     console.error('❌ Model loading failed:', err.message);
     throw err;
