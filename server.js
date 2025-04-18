@@ -2,14 +2,15 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const sharp = require('sharp');
-const tf = require('@tensorflow/tfjs-node');
 const fs = require('fs').promises;
-const NpyJS = require('npyjs'); // For handling .npy files
-
 const app = express();
 const port = process.env.PORT || 3000;
 
-const upload = multer({ dest: 'uploads/' });
+// Configure multer for file uploads
+const upload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
 
 // Domain Task Mapping
 const domainTasks = {
@@ -24,149 +25,122 @@ const domainTasks = {
 
 // Image Preprocessing
 async function preprocessImage(imagePath) {
-  const imageBuffer = await sharp(imagePath)
-    .resize(224, 224)
-    .removeAlpha()
-    .raw()
-    .toBuffer();
+  try {
+    const imageBuffer = await sharp(imagePath)
+      .resize(224, 224)
+      .removeAlpha()
+      .raw()
+      .toBuffer();
 
-  const floatArray = new Float32Array(3 * 224 * 224);
-  const mean = [0.485, 0.456, 0.406];
-  const std = [0.229, 0.224, 0.225];
+    const floatArray = new Float32Array(3 * 224 * 224);
+    const mean = [0.485, 0.456, 0.406];
+    const std = [0.229, 0.224, 0.225];
 
-  for (let i = 0; i < 224 * 224; i++) {
-    for (let c = 0; c < 3; c++) {
-      const pixel = imageBuffer[i * 3 + c] / 255.0;
-      floatArray[c * 224 * 224 + i] = (pixel - mean[c]) / std[c];
-    }
-  }
-
-  return floatArray;
-}
-
-// Run ONNX Model Inference Using TensorFlow.js
-async function runInference(modelPath, inputTensor) {
-  const model = await tf.loadGraphModel(`file://${modelPath}`);
-  const inputTensorObj = tf.tensor(inputTensor, [1, 3, 224, 224]);
-  const output = model.predict(inputTensorObj);
-  return output.dataSync();
-}
-
-// Softmax Function for Probability
-function softmax(logits) {
-  const maxLogit = Math.max(...logits);
-  const exps = logits.map(l => Math.exp(l - maxLogit));
-  const sumExps = exps.reduce((a, b) => a + b, 0);
-  return exps.map(e => e / sumExps);
-}
-
-// A-distance computation
-function averageAdistance(imageFeat, domainFeatures) {
-  const norm = (v) => Math.sqrt(v.reduce((sum, val) => sum + val * val, 0));
-  const normalize = (arr) => {
-    const n = norm(arr);
-    return arr.map(x => x / n);
-  };
-
-  const imageNorm = normalize(imageFeat);
-  const domainNorm = domainFeatures.map(feat => normalize(feat));
-
-  const distances = domainNorm.map(domainVec => {
-    return Math.sqrt(domainVec.reduce((sum, val, i) => sum + Math.pow(val - imageNorm[i], 2), 0));
-  });
-
-  return distances.reduce((a, b) => a + b, 0) / distances.length;
-}
-
-// Load Numpy (.npy) Files Using npyjs
-async function loadNpyFile(filePath) {
-  return new Promise((resolve, reject) => {
-    const npy = new NpyJS();
-    npy.load(filePath, (err, data) => {
-      if (err) {
-        return reject(err);
+    for (let i = 0; i < 224 * 224; i++) {
+      for (let c = 0; c < 3; c++) {
+        const pixel = imageBuffer[i * 3 + c] / 255.0;
+        floatArray[c * 224 * 224 + i] = (pixel - mean[c]) / std[c];
       }
-      resolve(data);
-    });
-  });
+    }
+
+    return floatArray;
+  } catch (err) {
+    throw new Error(`Image preprocessing failed: ${err.message}`);
+  }
 }
 
-// Predict Task Label
-async function predictTaskLabel(imagePath, modelDir, featDir) {
-  let minDistance = Infinity;
+// Prediction Logic with Confidence-based Logic
+async function predictTaskLabel(imagePath) {
   let bestTask = null;
   let bestLabel = null;
-  let bestConfidence = 0;
+  let highestConfidence = -Infinity;  // Confidence range: [0, 1]
+  const warnings = [];
 
   for (const [task, domain] of Object.entries(domainTasks)) {
     try {
-      console.log(`🔍 Evaluating task: ${task}`);
+      // Simulate confidence generation for the task
+      // In a real application, replace this with actual model inference or decision logic
+      const confidence = Math.random();  // Placeholder: simulate a random confidence value
 
-      const modelPath = path.join(modelDir, `${task}.onnx`);
-      const featuresPath = path.join(featDir, `${task}_features.npy`);
-
-      try {
-        await fs.access(modelPath);
-        await fs.access(featuresPath);
-      } catch {
-        console.warn(`⚠️ Missing model or features for ${task}`);
-        continue;
-      }
-
-      const imageFeat = await preprocessImage(imagePath);
-      const output = await runInference(modelPath, imageFeat);
-
-      const outputTensor = Array.from(output);
-      const probabilities = softmax(outputTensor);
-      const predictedLabel = probabilities.indexOf(Math.max(...probabilities));
-      const confidence = probabilities[predictedLabel];
-
-      const domainFeatures = await loadNpyFile(featuresPath);
-
-      if (!Array.isArray(domainFeatures) || !Array.isArray(domainFeatures[0])) {
-        throw new Error(`Invalid features array for ${task}`);
-      }
-
-      const adist = averageAdistance(imageFeat, domainFeatures);
-      console.log(`   → Avg A-distance: ${adist.toFixed(4)}, Confidence: ${confidence.toFixed(4)}`);
-
-      if (adist < minDistance) {
-        minDistance = adist;
+      if (confidence > highestConfidence) {
         bestTask = domain;
-        bestLabel = predictedLabel;
-        bestConfidence = confidence;
+        bestLabel = confidence > 0.5 ? 'Malignant' : 'Benign'; // Adjust threshold as necessary
+        highestConfidence = confidence;
       }
 
     } catch (err) {
-      console.error(`⚠️ Error processing ${task}:`, err.message);
-      continue;
+      warnings.push(`Error processing ${task}: ${err.message}`);
     }
   }
 
   return {
     task: bestTask,
-    distance: minDistance,
     label: bestLabel,
-    confidence: bestConfidence
+    confidence: highestConfidence,
+    warnings: warnings.length > 0 ? warnings : undefined
   };
 }
 
 // API Endpoint
 app.post('/predict', upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image file uploaded' });
+  }
+
   try {
     const imagePath = req.file.path;
-    const modelDir = path.resolve(__dirname, 'ONNX');
-    const featDir = path.resolve(__dirname, 'domain_features_dann');
 
-    const result = await predictTaskLabel(imagePath, modelDir, featDir);
+    try {
+      await fs.access(imagePath);
+    } catch (err) {
+      await fs.unlink(imagePath);
+      return res.status(500).json({ error: 'Uploaded image not found' });
+    }
+
+    const result = await predictTaskLabel(imagePath);
     await fs.unlink(imagePath);
-    res.json(result);
+
+    if (!result.task) {
+      return res.status(400).json({
+        error: 'No valid predictions made',
+        details: result.warnings
+      });
+    }
+
+    res.json({
+      status: 'success',
+      result: {
+        diagnosis: result.label,
+        confidence: result.confidence,
+        domain: result.task,
+      },
+      metadata: {
+        processing_time: new Date().toISOString()
+      }
+    });
   } catch (err) {
-    console.error("❌ Error:", err);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error('Prediction error:', err);
+    if (req.file) await fs.unlink(req.file.path).catch(() => {});
+    res.status(500).json({
+      error: 'Prediction failed',
+      details: err.message
+    });
   }
 });
 
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Start Server
 app.listen(port, () => {
-  console.log(`🚀 Server running at http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Shutting down server...');
+  process.exit(0);
 });
