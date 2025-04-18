@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
@@ -7,14 +8,13 @@ const ort = require('onnxruntime-node');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Configure multer for file uploads
-const upload = multer({
-  dest: 'uploads/',
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
-});
+// Constants
+const MODEL_DIR = path.resolve(__dirname, 'ONNX');
+const UPLOAD_DIR = path.resolve(__dirname, 'uploads');
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 // Domain Task Mapping
-const domainTasks = {
+const DOMAIN_TASKS = {
   "bcn_vs_ham_age_u30": "bcn_age_u30",
   "msk_vs_bcn_age_u30": "msk_age_u30",
   "bcn_vs_ham_loc_head_neck": "bcn_loc_head_neck",
@@ -24,46 +24,89 @@ const domainTasks = {
   "bcn_vs_ham_loc_palms_soles": "bcn_loc_palms_soles"
 };
 
-// Model management
-const models = {};
-const modelDir = path.resolve(__dirname, 'ONNX');
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: UPLOAD_DIR,
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.match(/^image\/(jpeg|jpg|png)$/)) {
+      return cb(new Error('Only image files are allowed!'), false);
+    }
+    cb(null, true);
+  }
+});
+
+// Global model cache
+const models = new Map();
+let isInitialized = false;
+
+// Initialize application
+async function initialize() {
+  try {
+    // Create required directories
+    await fs.mkdir(UPLOAD_DIR, { recursive: true });
+    await fs.mkdir(MODEL_DIR, { recursive: true });
+
+    // Load models
+    await loadModels();
+    isInitialized = true;
+    console.log('✅ Application initialized');
+  } catch (err) {
+    console.error('❌ Initialization failed:', err);
+    process.exit(1);
+  }
+}
 
 // Load all ONNX models
 async function loadModels() {
+  console.log(`🔍 Loading models from: ${MODEL_DIR}`);
+
   try {
-    console.log(`Loading models from: ${modelDir}`);
-    
-    // Verify ONNX directory exists
-    try {
-      await fs.access(modelDir);
-    } catch {
-      throw new Error(`ONNX directory not found at: ${modelDir}`);
-    }
-
-    // Load each model
-    for (const task of Object.keys(domainTasks)) {
-      const modelPath = path.join(modelDir, `${task}.onnx`);
-      
-      try {
-        await fs.access(modelPath);
-        console.log(`Loading model: ${task}.onnx`);
-        models[task] = await ort.InferenceSession.create(modelPath);
-      } catch (err) {
-        console.warn(`⚠️ Failed to load model for ${task}: ${err.message}`);
-        continue;
-      }
-    }
-
-    // Verify at least one model loaded
-    if (Object.keys(models).length === 0) {
-      throw new Error('No ONNX models could be loaded');
-    }
-
-    console.log(`Successfully loaded ${Object.keys(models).length} models`);
-  } catch (err) {
-    console.error('Model loading failed:', err);
-    throw err;
+    await fs.access(MODEL_DIR);
+  } catch {
+    throw new Error(`Model directory not found: ${MODEL_DIR}`);
   }
+
+  const modelFiles = await fs.readdir(MODEL_DIR);
+  const onnxModels = modelFiles.filter(file => file.endsWith('.onnx'));
+
+  if (onnxModels.length === 0) {
+    throw new Error(`No ONNX models found in ${MODEL_DIR}`);
+  }
+
+  const loadPromises = onnxModels.map(async (modelFile) => {
+    const task = modelFile.replace('.onnx', '');
+    if (!DOMAIN_TASKS[task]) {
+      console.warn(`⚠️ No task mapping for model: ${modelFile}`);
+      return;
+    }
+
+    try {
+      const modelPath = path.join(MODEL_DIR, modelFile);
+      console.log(`⏳ Loading model: ${modelFile}`);
+      const session = await ort.InferenceSession.create(modelPath);
+      models.set(task, session);
+      console.log(`✅ Loaded model: ${modelFile}`);
+    } catch (err) {
+      console.error(`❌ Failed to load model ${modelFile}:`, err.message);
+    }
+  });
+
+  await Promise.all(loadPromises);
+
+  if (models.size === 0) {
+    throw new Error('No models could be loaded');
+  }
+
+  console.log(`🎉 Successfully loaded ${models.size}/${Object.keys(DOMAIN_TASKS).length} models`);
 }
 
 // Image Preprocessing
@@ -71,6 +114,7 @@ async function preprocessImage(imagePath) {
   try {
     const imageBuffer = await sharp(imagePath)
       .resize(224, 224)
+      .normalize()
       .removeAlpha()
       .raw()
       .toBuffer();
@@ -92,127 +136,152 @@ async function preprocessImage(imagePath) {
   }
 }
 
+// Run Inference
+async function runInference(task, inputTensor) {
+  const session = models.get(task);
+  if (!session) {
+    throw new Error(`Model not loaded for task: ${task}`);
+  }
+
+  try {
+    const input = new ort.Tensor('float32', inputTensor, [1, 3, 224, 224]);
+    const output = await session.run({ input });
+    return output[session.outputNames[0]].data;
+  } catch (err) {
+    throw new Error(`Inference failed for ${task}: ${err.message}`);
+  }
+}
+
 // Prediction Logic
 async function predictTaskLabel(imagePath) {
-  let bestResult = {
-    task: null,
-    label: null,
-    confidence: -Infinity
-  };
+  const results = [];
   const warnings = [];
 
   try {
     const imageData = await preprocessImage(imagePath);
 
-    for (const [task, domain] of Object.entries(domainTasks)) {
-      if (!models[task]) {
-        warnings.push(`Model not loaded for task: ${task}`);
+    for (const [task, domain] of Object.entries(DOMAIN_TASKS)) {
+      if (!models.has(task)) {
+        warnings.push(`Model not available for task: ${task}`);
         continue;
       }
 
       try {
-        const model = models[task];
-        const inputTensor = new ort.Tensor('float32', imageData, [1, 3, 224, 224]);
-        
-        // Run inference (note the correct input name)
-        const output = await model.run({ input: inputTensor });
-        
-        // Get the first output tensor
-        const outputName = model.outputNames[0];
-        const outputData = output[outputName].data;
-        
-        // Assuming binary classification output [prob_class0, prob_class1]
-        const confidence = outputData[1]; // Probability for class 1 (Malignant)
-        const label = confidence > 0.5 ? 'Malignant' : 'Benign';
-
-        if (confidence > bestResult.confidence) {
-          bestResult = {
-            task: domain,
-            label,
-            confidence
-          };
-        }
+        const output = await runInference(task, imageData);
+        const confidence = output[1]; // Assuming binary classification
+        results.push({
+          task,
+          domain,
+          confidence,
+          label: confidence > 0.5 ? 'Malignant' : 'Benign'
+        });
       } catch (err) {
         warnings.push(`Error processing ${task}: ${err.message}`);
       }
     }
 
+    if (results.length === 0) {
+      throw new Error('No successful predictions');
+    }
+
+    // Find result with highest confidence
+    const bestResult = results.reduce((best, current) => 
+      current.confidence > best.confidence ? current : best
+    );
+
     return {
       ...bestResult,
       warnings: warnings.length > 0 ? warnings : undefined
     };
-
   } catch (err) {
     throw new Error(`Prediction failed: ${err.message}`);
   }
 }
 
-// API Endpoint
+// API Endpoints
 app.post('/predict', upload.single('image'), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'No image file uploaded' });
+    return res.status(400).json({ 
+      status: 'error',
+      error: 'No image file uploaded' 
+    });
+  }
+
+  if (!isInitialized) {
+    return res.status(503).json({
+      status: 'error',
+      error: 'Service initializing'
+    });
   }
 
   try {
     const result = await predictTaskLabel(req.file.path);
-    await fs.unlink(req.file.path);
-
-    if (!result.task) {
-      return res.status(400).json({
-        error: 'No valid predictions made',
-        details: result.warnings || 'No models available'
-      });
-    }
+    
+    // Clean up uploaded file
+    await fs.unlink(req.file.path).catch(console.error);
 
     res.json({
       status: 'success',
       result: {
         diagnosis: result.label,
         confidence: result.confidence,
-        domain: result.task
+        domain: result.domain
       },
       metadata: {
+        model: result.task,
         processing_time: new Date().toISOString()
-      }
+      },
+      warnings: result.warnings
     });
   } catch (err) {
     console.error('Prediction error:', err);
-    if (req.file) await fs.unlink(req.file.path).catch(console.error);
+    await fs.unlink(req.file.path).catch(console.error);
     res.status(500).json({
+      status: 'error',
       error: 'Prediction failed',
       details: err.message
     });
   }
 });
 
-// Health check endpoint
+// Health Check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    loaded_models: Object.keys(models).length,
-    total_models: Object.keys(domainTasks).length
+    models_loaded: models.size,
+    models_expected: Object.keys(DOMAIN_TASKS).length,
+    initialized: isInitialized
   });
 });
 
-// Error handler
+// Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// Start server after loading models
-loadModels().then(() => {
-  app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log(`Loaded ${Object.keys(models).length}/${Object.keys(domainTasks).length} models`);
+  res.status(500).json({ 
+    status: 'error',
+    error: 'Internal server error' 
   });
-}).catch(err => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
 });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\nShutting down server...');
-  process.exit(0);
+// Start Server
+initialize().then(() => {
+  app.listen(port, () => {
+    console.log(`🚀 Server running on port ${port}`);
+    console.log(`📁 Model directory: ${MODEL_DIR}`);
+    console.log(`📁 Upload directory: ${UPLOAD_DIR}`);
+  });
+});
+
+// Graceful Shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down server...');
+  try {
+    // Clean up resources
+    await fs.rm(UPLOAD_DIR, { recursive: true, force: true });
+    console.log('✅ Cleanup complete');
+    process.exit(0);
+  } catch (err) {
+    console.error('Shutdown error:', err);
+    process.exit(1);
+  }
 });
