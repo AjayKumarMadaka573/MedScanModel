@@ -47,6 +47,9 @@ const upload = multer({
 // Global model cache
 const models = new Map();
 let isInitialized = false;
+let modelsLoading = false;
+let modelsLoaded = false;
+
 
 // Initialize application
 async function initialize() {
@@ -69,52 +72,91 @@ async function initialize() {
 
 // Load all ONNX models
 async function loadModels() {
-  // Check if models are already loaded
-  if (models.size > 0) {
-    console.log('⚠️ Models already loaded, skipping...');
+  // Check if models are already loaded or currently loading
+  if (modelsLoaded) {
+    console.log('ℹ️ Models already loaded');
+    return;
+  }
+  if (modelsLoading) {
+    console.log('⏳ Models are currently being loaded');
     return;
   }
 
+  modelsLoading = true;
   console.log(`🔍 Loading models from: ${MODEL_DIR}`);
+
   try {
-    await fs.access(MODEL_DIR);
-  } catch {
-    throw new Error(`Model directory not found: ${MODEL_DIR}`);
-  }
-
-  const modelFiles = await fs.readdir(MODEL_DIR);
-  const onnxModels = modelFiles.filter(file => file.endsWith('.onnx'));
-
-  if (onnxModels.length === 0) {
-    throw new Error(`No ONNX models found in ${MODEL_DIR}`);
-  }
-
-  const loadPromises = onnxModels.map(async (modelFile) => {
-    const task = modelFile.replace('.onnx', '');
-    if (!DOMAIN_TASKS[task]) {
-      console.warn(`⚠️ No task mapping for model: ${modelFile}`);
-      return;
-    }
-
+    // Verify model directory exists
     try {
-      const modelPath = path.join(MODEL_DIR, modelFile);
-      console.log(`⏳ Loading model: ${modelFile}`);
-      const session = await ort.InferenceSession.create(modelPath);
-      models.set(task, session);
-      console.log(`✅ Loaded model: ${modelFile}`);
-    } catch (err) {
-      console.error(`❌ Failed to load model ${modelFile}:`, err.message);
+      await fs.access(MODEL_DIR);
+    } catch {
+      throw new Error(`Model directory not found: ${MODEL_DIR}`);
     }
-  });
 
-  await Promise.all(loadPromises);
+    // Get list of available models
+    const modelFiles = await fs.readdir(MODEL_DIR);
+    const onnxModels = modelFiles.filter(file => file.endsWith('.onnx'));
 
-  if (models.size === 0) {
-    throw new Error('No models could be loaded');
+    if (onnxModels.length === 0) {
+      throw new Error(`No ONNX models found in ${MODEL_DIR}`);
+    }
+
+    // Load models with progress tracking
+    const loadingResults = await Promise.allSettled(
+      onnxModels.map(async (modelFile) => {
+        const task = modelFile.replace('.onnx', '');
+        if (!DOMAIN_TASKS[task]) {
+          console.warn(`⚠️ No task mapping for model: ${modelFile}`);
+          return { task, status: 'skipped' };
+        }
+
+        try {
+          const modelPath = path.join(MODEL_DIR, modelFile);
+          console.log(`⏳ Loading model: ${modelFile}`);
+          const session = await ort.InferenceSession.create(modelPath);
+          models.set(task, session);
+          console.log(`✅ Loaded model: ${modelFile}`);
+          return { task, status: 'loaded' };
+        } catch (err) {
+          console.error(`❌ Failed to load model ${modelFile}:`, err.message);
+          return { task, status: 'failed', error: err.message };
+        }
+      })
+    );
+
+    // Analyze loading results
+    const loadedCount = loadingResults.filter(
+      r => r.value?.status === 'loaded'
+    ).length;
+    const failedCount = loadingResults.filter(
+      r => r.value?.status === 'failed'
+    ).length;
+
+    if (loadedCount === 0) {
+      throw new Error('No models could be loaded');
+    }
+
+    console.log(`\n🎉 Model Loading Summary:`);
+    console.log(`   ➔ Success: ${loadedCount}`);
+    console.log(`   ➔ Failed: ${failedCount}`);
+    console.log(`   ➔ Skipped: ${loadingResults.length - loadedCount - failedCount}\n`);
+
+    modelsLoaded = true;
+    return {
+      total: onnxModels.length,
+      loaded: loadedCount,
+      failed: failedCount
+    };
+  } catch (err) {
+    console.error('❌ Model loading failed:', err.message);
+    throw err;
+  } finally {
+    modelsLoading = false;
   }
-
-  console.log(`🎉 Successfully loaded ${models.size}/${Object.keys(DOMAIN_TASKS).length} models`);
 }
+
+
+
 
 // Image Preprocessing
 async function preprocessImage(imagePath) {
